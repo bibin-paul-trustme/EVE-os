@@ -1,0 +1,9 @@
+image: eve-rngd
+org: lfedge
+config:
+  capabilities:
+    - CAP_SYS_ADMIN
+  oomScoreAdj: -800
+  readonly: true
+  net: new
+  ipc: new

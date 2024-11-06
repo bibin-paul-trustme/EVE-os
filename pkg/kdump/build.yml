@@ -1,0 +1,13 @@
+image: eve-kdump
+org: lfedge
+config:
+  binds:
+    - /dev:/dev
+    - /proc:/proc
+    - /persist:/persist:rshared,rbind
+  rootfsPropagation: shared
+  capabilities:
+    - all
+  devices:
+    - path: all
+      type: a

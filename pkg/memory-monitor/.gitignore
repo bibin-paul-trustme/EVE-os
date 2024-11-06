@@ -1,0 +1,9 @@
+*.out
+*.o
+zedbox
+obj
+bin
+dist
+dist-tar
+results
+memory-monitor.tar.bz2

@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# mkrootfs -- Create an EVE rootfs
+#
+# Input is a tarball containing the rootfs partition.
+# Output is a raw partition on stdout
+#
+# The following env variables change the behaviour of this script
+#     DEBUG - makes this script verbose
+
+set -e
+[ -n "$DEBUG" ] && set -x
+
+IMGFILE=/rootfs.img
+[ -f "$IMGFILE" ] || EXPORT_CMD="cat $IMGFILE"
+
+# we want everything except the final result to stderr
+( exec 1>&2;
+
+  mkdir -p /tmp/rootfs
+  cd /tmp/rootfs
+
+  [ -t 0 ] || bsdtar xzf -
+
+  # This _filesystem_ UUID will be later reused as the _partition_
+  # UUID when creating the final image. This will allow us to have
+  # a static grub configuration.
+  ROOTFS_UUID=$(cat /proc/sys/kernel/random/uuid)
+  ROOTFS_BLOCKSZ=4096
+  ROOTFS_PART_HEADROOM_BLOCKS=16000
+
+  ROOTFS_FILE_SIZE_KB=$(du -sk . | awk '{print $1}')
+  ROOTFS_PART_BLOCKS=$(( $ROOTFS_FILE_SIZE_KB / 4 + $ROOTFS_PART_HEADROOM_BLOCKS ))
+  # Increase fs size on 200MB. We need extra room for updating packages while
+  # building live image. See 'LIVE_UPDATE=1 live' in the Makefile.
+  ROOTFS_PART_EXTRA_SPACE=$((200<<20))
+  ROOTFS_PART_SIZE=$(((ROOTFS_PART_BLOCKS * ROOTFS_BLOCKSZ) + ROOTFS_PART_EXTRA_SPACE))
+  ROOTFS_PART_SIZE_KB=$(((ROOTFS_PART_SIZE + 1023) / 1024))
+
+  dd if=/dev/zero of=$IMGFILE bs=1024 seek="$ROOTFS_PART_SIZE_KB" count=0
+  mkfs.ext4 -b 4096 -L eve_rootfs -U "$ROOTFS_UUID" -v "$IMGFILE"
+  mkdir -p /mnt
+  mount -o loop $IMGFILE /mnt
+  cp -R /tmp/rootfs/* /mnt
+  umount /mnt
+
+)
+
+$EXPORT_CMD

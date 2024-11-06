@@ -1,0 +1,231 @@
+#!/bin/sh
+
+# first make sure busybox gets expanded into the glory that is UNIX
+/bin/busybox --install /bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs -o size=10m,nr_inodes=248418,mode=755,nosuid,noexec,relatime devtmpfs /dev
+
+root=`cat /proc/cmdline | grep -o '\broot=[^ ]*' | cut -d = -f 2`
+if test -z "$root"
+then
+    exit 1
+fi
+
+if [ -e /dev/xen ]; then
+   HYPER_BUS=xen
+else
+   HYPER_BUS=virtio
+fi
+
+mkdir /mnt >/dev/null 2>&1
+if [ "$root" = "9p" ]; then
+    mount -t 9p -o msize=131072,trans="$HYPER_BUS",version=9p2000.L,cache=mmap share_dir /mnt
+else
+    mount $root /mnt
+fi
+
+mkdir /mnt/rootfs/dev >/dev/null 2>&1
+mkdir -p /mnt/rootfs/sys/fs/cgroup >/dev/null 2>&1
+mkdir /mnt/rootfs/proc >/dev/null 2>&1
+mkdir /dev/pts >/dev/null 2>&1
+mkdir /dev/shm >/dev/null 2>&1
+mkdir /dev/mqueue >/dev/null 2>&1
+if [ -d /mnt/rootfs/dev/eve ]; then
+   mkdir -p /dev/eve
+   mount -o bind /mnt/rootfs/dev/eve /dev/eve
+fi
+mount -o rbind /dev /mnt/rootfs/dev
+mount -o bind /sys /mnt/rootfs/sys
+mount -t tmpfs -o uid=0,gid=0,mode=0755 cgroup /mnt/rootfs/sys/fs/cgroup
+awk '!/^#/ { if ($4 == 1) print $1 }' /proc/cgroups | while IFS= read -r sys
+do
+  cgroup="/mnt/rootfs/sys/fs/cgroup/$sys"
+  mkdir -p "$cgroup"
+  if ! mountpoint -q "$cgroup"; then
+    if ! mount -n -t cgroup -o "$sys" cgroup "$cgroup"; then
+      rmdir "$cgroup" || true
+    fi
+  fi
+done
+if [ -e /mnt/rootfs/sys/fs/cgroup/memory/memory.use_hierarchy ]; then
+  echo 1 > /mnt/rootfs/sys/fs/cgroup/memory/memory.use_hierarchy
+fi
+mount -t devpts -o gid=5,mode=0620,noexec,nosuid devpts /mnt/rootfs/dev/pts
+mount -t tmpfs -o nodev,nosuid,noexec,size=20% shm /mnt/rootfs/dev/shm
+mount -t tmpfs -o nodev,nosuid,size=20% tmp /mnt/rootfs/tmp
+mount -t mqueue -o nodev,nosuid,noexec none /mnt/rootfs/dev/mqueue
+ln -s /proc/self/fd /mnt/rootfs/dev/fd
+ln -s /proc/self/fd/0 /mnt/rootfs/dev/stdin
+ln -s /proc/self/fd/1 /mnt/rootfs/dev/stdout
+ln -s /proc/self/fd/2 /mnt/rootfs/dev/stderr
+
+ip=`cat /proc/cmdline | grep -o '\bip=[^ ]*' | cut -d = -f 2`
+gw=`cat /proc/cmdline | grep -o '\bgw=[^ ]*' | cut -d = -f 2`
+route=`cat /proc/cmdline | grep -o '\broute=[^ ]*' | cut -d = -f 2`
+pvcalls=`cat /proc/cmdline | grep  'pvcalls=1'`
+dhcp=`cat /proc/cmdline | grep  'dhcp=1'`
+if test "$pvcalls"
+then
+        mkdir -p /mnt/rootfs/etc
+        echo "nameserver 8.8.8.8" > /mnt/rootfs/etc/resolv.conf
+        echo "options use-vc" >> /mnt/rootfs/etc/resolv.conf
+elif test "$ip"
+then
+    # ipv4
+    if [ "$ip" != "${ip#*[0-9].[0-9]}" ]
+    then
+        ifconfig eth0 $ip up
+        if [ "$route" ] && [ "$gw" ]
+        then
+            route add -net $route gw $gw eth0
+        fi
+        mkdir -p /mnt/rootfs/etc
+        echo "nameserver 8.8.8.8" > /mnt/rootfs/etc/resolv.conf
+    # ipv6
+    elif [ "$ip" != "${ip#*:[0-9a-fA-F]}" ]
+    then
+        ifconfig eth0 add $ip up
+        if [ "$route" ] && [ "$gw" ]
+        then
+            route -A inet6 add $route gw $gw eth0
+        fi
+        mkdir -p /mnt/rootfs/etc
+        echo "nameserver 2001:4860:4860::8888" > /mnt/rootfs/etc/resolv.conf
+    fi
+elif test "$dhcp"
+then
+    ip link set dev lo up
+    mkdir -p /mnt/rootfs/etc
+    echo "127.0.0.1 localhost" > /mnt/rootfs/etc/hosts
+    echo "::1 localhost" >> /mnt/rootfs/etc/hosts
+    for i in $(cd /sys/class/net && echo eth*); do
+        ip link set dev "$i" up
+        udhcpc --interface="$i" --script=/udhcpc_script.sh -O staticroutes -O mtu -b
+    done
+fi
+
+# Initialize MTU of ethernet interfaces connected to network instances (VIFs).
+# Note that directly assigned physical NICs are ordered after VIFs, and their MTUs
+# are not specified in /proc/cmdline.
+mtu_values="$(grep -o '\bmtu=[^ ]*' /proc/cmdline | cut -d = -f 2 | tr "," " ")"
+i=0
+for mtu in $mtu_values; do
+    ip link set mtu "$mtu" dev "eth$i"
+    i=$((i+1))
+done
+
+# Make modules available for hosting Vm
+mount --bind /mnt/modules /lib/modules
+mount_res=$?
+echo "Mount /mnt/modules as /lib/modules, result $mount_res"
+
+#
+# Here load modules needed for a container
+#
+modprobe wireguard
+mod_res=$?
+echo "Modprobe wireguard, result $mod_res"
+
+# mount modules shared by EVE-OS in /mnt/modules to /lib/modules
+# if /lib/modules inside container is not empty we will silently ignore the content
+# we use overlayfs to allow replacing of modules from user's entrypoint scripts
+# but changes will not persist reboot
+mkdir -p /mnt/rootfs/lib/modules
+mkdir -p /mnt/rootfs/tmp/modules.upper
+mkdir -p /mnt/rootfs/tmp/modules.work
+mount -t overlay -o rw,relatime,lowerdir=/mnt/modules,upperdir=/mnt/rootfs/tmp/modules.upper,workdir=/mnt/rootfs/tmp/modules.work overlay /mnt/rootfs/lib/modules
+
+# Mounting requested volumes
+echo "Executing /mount_disk.sh"
+/mount_disk.sh
+
+# Check if the environment file can be successfully processed by the shell,
+# otherwise write an error message and exit with the input data error code
+# shellcheck disable=SC1091,SC2091
+if $(. /mnt/environment); then
+    # shellcheck disable=SC1091
+    . /mnt/environment
+else
+    echo "Error processing the environment variables file!"
+    exit 65 # EX_DATAERR
+fi
+
+# Start launch sequence
+echo "Run acpid daemon"
+acpid -l /proc/self/fd/1
+
+# Start chrony daemon for clock synchronization through PTP_KVM device,
+# this option is enabled by default
+if [ ! "$EVE_ENABLE_CHRONY" = "0" ]; then
+  # PTP_KVM is only available with KVM
+  if test -c /dev/ptp0; then
+    echo "Starting chrony daemon..." > /dev/kmsg
+    mkdir -p /etc/chrony
+    cat > /etc/chrony/chrony.conf << EOF
+# This file was autogenerated by EVE
+refclock PHC /dev/ptp0 poll 2
+driftfile /var/lib/chrony/chrony.drift
+ntsdumpdir /var/lib/chrony
+logdir /var/log/chrony
+maxupdateskew 100.0
+EOF
+    /usr/sbin/chronyd -u root -f /etc/chrony/chrony.conf &&
+        echo "chronyd started!" > /dev/kmsg ||
+        echo "chronyd NOT started!" > /dev/kmsg
+  else
+    echo "PTP_KVM device is not available!" > /dev/kmsg
+  fi
+fi
+
+run_agetty_loop()
+{
+  console_name="$1"
+  while true; do
+    setsid agetty --autologin root --noclear "$console_name" linux
+  done
+}
+
+echo "Executing agetty"
+# run agetty on the virtual console connected to the socket
+run_agetty_loop hvc1 &
+# run agetty on the virtual console available for VNC
+run_agetty_loop hvc2 &
+
+cmd=`cat /mnt/cmdline`
+echo "Executing $cmd"
+
+ug="0 0"
+if [ -f /mnt/ug ]; then
+  ug=$(cat /mnt/ug)
+fi
+echo "Executing with uid gid: $ug"
+
+# File which will contain a PID of the started entrypoint container
+# process. File will be used for the `eve-enter-container` script.
+pid_file="/mnt/entrypoint-pid"
+
+if grep -q "console=tty0" /proc/cmdline; then
+  #shellcheck disable=SC2086
+  #we have tty0 console primary, so will add output to hvc0 for logging
+  eval /chroot2 /mnt/rootfs "${WORKDIR:-/}" $ug $pid_file $cmd 2>&1 | tee -i /dev/hvc0
+else
+  #shellcheck disable=SC2086
+  eval /chroot2 /mnt/rootfs "${WORKDIR:-/}" $ug $pid_file $cmd <> /dev/console 2>&1
+fi
+chroot_ret=$?
+
+# Container exited, final lines
+
+if test "$EVE_CONTAINER_NO_POWEROFF" = "1"; then
+  # Don't power off, wait for further debugging
+  echo "chroot2 exited with $chroot_ret, the init-initrd idles, please attach to the 'prime-cons' console of the hosting Vm for further debugging"
+  sleep infinity
+else
+  # Power off is the default behavior
+  echo "chroot2 exited with $chroot_ret, the init-initrd is about to quit by calling /sbin/poweroff, which shuts the whole VM down"
+fi
+
+# Do poweroff to avoid kernel panic on init exit
+/sbin/poweroff

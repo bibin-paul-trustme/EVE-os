@@ -1,0 +1,105 @@
+#!/bin/sh
+#
+# input is a tarball on stdin with kernel and cmdline in /boot
+# output is an iso on stdout
+#
+# The following env variables change the behaviour of this script
+#     DEBUG - makes this script verbose
+
+set -e
+[ -n "$DEBUG" ] && set -x
+
+copy() {
+   dd if="$1" of="$2" bs=1M 2>/dev/null
+}
+
+#
+# Extract partitions from stdin or look them up in /bits
+#
+mkdir -p /parts 2>/dev/null || :
+cd /parts
+if [ -d /bits ]; then
+   ln -s /bits/* .
+   rm \* >/dev/null 2>&1 || :
+else
+   bsdtar xzf -
+fi
+
+# create a ISO with a EFI boot partition
+# Stuff it into a FAT filesystem, making it as small as possible.  511KiB
+# headroom seems to be enough; (x+31)/32*32 rounds up to multiple of 32.
+mkfs.vfat -v -C boot.img \
+        $(( ($(stat -c %s EFI/BOOT/BOOT*EFI) / 1024 + 511) \
+        / 32 * 32 )) > /dev/null
+
+mmd -i boot.img ::/EFI
+mmd -i boot.img ::/EFI/BOOT
+mcopy -i boot.img EFI/BOOT/* ::/EFI/BOOT/
+
+# for installer we need to add a uuid and override the grub.cfg
+if [ "$1" = installer ]; then
+   mkdir -p boot
+   touch boot/.boot_repository
+   od -An -x -N 16 /dev/random | tr -d ' ' > boot/.uuid
+   # do not try overriding grub.cfg inside the fat32 image.
+   # UEFI does not make it available to the EFI filesystem, it just loads from
+   # wherever it sees its $prefix.
+   # However, some UEFI implementations *might* do it, so we insert one there that just
+   # loads the next one.
+   cat > /tmp/grub.cfg <<'EOF'
+install_part="$cmddevice"
+set dev=$install_part
+
+set root=$dev
+configfile ($dev)/EFI/BOOT/grub.cfg
+EOF
+   mcopy -i boot.img -o /tmp/grub.cfg ::/EFI/BOOT/
+fi
+
+# was a volume label set? If so, also create an initrd.img that can find that label
+# unfortunately, the kernel does not support ISO label as a root= option
+# see all of the options https://github.com/torvalds/linux/blob/b831f83e40a24f07c8dcba5be408d93beedc820f/block/early-lookup.c#L216-L244
+VOL_LABEL=""
+if [ -n "$VOLUME_LABEL" ]; then
+   VOL_LABEL="-V $VOLUME_LABEL"
+fi
+
+if [ ! -e boot/initrd.img ]; then
+   # all of the things we need to make a simple initrd
+   mkdir -p /tmp/initrd
+   (cd /tmp/initrd
+   mkdir -p bin lib sbin etc proc sys newroot
+   cp /initrd.sh init
+   cp /bin/busybox bin/
+   cp /lib/ld-musl* lib/
+   /bin/busybox --install -s /tmp/initrd/bin
+   find . | cpio -H newc -o | gzip > /tmp/initrd.img)
+   mv /tmp/initrd.img boot/initrd.img
+fi
+
+# pay attention to the -f option: it follows symlinks which is exactly
+# what we need for installer construction but could be dangerous in the
+# generic case for this container
+xorriso -as mkisofs \
+        -m rootfs-\* -f -R -e boot.img -hide boot.img -hide boot.catalog -no-emul-boot ${VOL_LABEL} -o /tmp/disk.iso .
+copy /tmp/disk.iso /output.iso
+
+# How to build a VHDX. Commented out because we are currently not using it
+# Don't delete: It took too long to figure out how to do this...
+# # create a disk image (150MB)
+# # This is a little odd, as we run this as part of the default command.
+# # Can't run this during the build step as it requires privilege.
+# # The Magic numbers in losetup are startsector (2048) times 512 and
+# # (endsector - startsector) * 512
+# CMD cd /tmp/efi && \
+#     dd if=/dev/zero of=disk.raw bs=1024 count=51200 && \
+#     sgdisk -N 1 -t 1:ef00 disk.raw && \
+#     losetup -o 1048576 --sizelimit 51362816 /dev/loop/1 disk.raw && \
+#     mkfs.vfat /dev/loop/1 && \
+#     echo "drive c: file=\"/dev/loop/1\" mtools_skip_check=1" > /etc/mtools.conf && \
+#     mmd c:/EFI && \
+#     mmd c:/EFI/BOOT && \
+#     mcopy linuxkit.efi c:/EFI/BOOT/BOOTX64.EFI && \
+#     losetup -d /dev/loop/1 && \
+#     qemu-img convert -O vhdx disk.raw linuxkit-boot.vhdx && \
+#     cp /tmp/efi/linuxkit.efi /tmp/efi/linuxkitefi.iso /tmp/efi/linuxkit-boot.vhdx /mnt/

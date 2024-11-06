@@ -1,0 +1,14 @@
+image: eve-guacd
+org: lfedge
+config:
+  binds:
+    - /dev:/dev
+    - /etc/resolv.conf:/etc/resolv.conf
+    - /run:/run
+    - /config:/config
+  net: host
+  capabilities:
+    - all
+  devices:
+    - path: all
+      type: a

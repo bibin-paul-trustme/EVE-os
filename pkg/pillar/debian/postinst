@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# Copyright (c) 2018 Zededa, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# load br_netfilter module and make it persit through reboots
+modprobe br_netfilter
+echo "br_netfilter" >> /etc/modules
+
+# Get PIP
+cd /opt/zededa/lisp
+python get-pip.py
+
+# Install ecdsa python module
+pip install ecdsa==0.13
+
+# Install python modules required by LISP
+pip install -r pip-requirements.txt \
+    --allow-external pcappy \
+    --allow-unverified pcappy
+
+# Lisp python code expects pyOpenSSL version 16.2.0
+# But the pip-requirements file bundled with lisp tar ball
+# has version 0.14 specified. We override the default configuration
+# and install 16.2.0 to make lisp work
+sudo pip install pyOpenSSL==16.2.0
+
+# Test LISP installation
+python lispers.net-test-install.pyo

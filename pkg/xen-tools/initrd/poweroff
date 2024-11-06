@@ -1,0 +1,24 @@
+#!/bin/sh
+
+killit() {
+  for p in [0-9]*; do
+    # shellcheck disable=SC2086
+    [ "$p" -ne 1 ] && [ "$p" -ne "$$" ] && kill $1 "$p"
+  done
+}
+
+# when the earth is on the move, the safest place to be is /proc
+cd /proc || /hacf
+
+# first, try an oderly shutdown of processes
+killit
+# grace period
+sleep 30
+# now go for an actual kill
+killit -9
+# unmount all disks
+/bin/umount -a -r
+# shutdown the system
+/hacf
+# this should never happen
+sleep 10

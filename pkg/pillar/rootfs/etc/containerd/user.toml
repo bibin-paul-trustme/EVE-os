@@ -1,0 +1,34 @@
+version = 2
+state = "/run/containerd-user"
+root = "/persist/vault/containerd"
+disabled_plugins = [
+    "io.containerd.grpc.v1.cri",
+    "io.containerd.snapshotter.v1.btrfs",
+    "io.containerd.snapshotter.v1.aufs",
+    "io.containerd.runtime.v1.linux",
+    "io.containerd.runtime.v2.task",
+    "io.containerd.service.v1.tasks-service",
+    "io.containerd.internal.v1.restart",
+    "io.containerd.grpc.v1.tasks",
+    "io.containerd.service.v1.containers-service",
+    "io.containerd.grpc.v1.containers",
+    "io.containerd.monitor.v1.cgroups",
+    "io.containerd.snapshotter.v1.native",
+    "io.containerd.internal.v1.tracing",
+    "io.containerd.tracing.processor.v1.otlp"
+]
+
+[grpc]
+  address = "/run/containerd-user/containerd.sock"
+  uid = 0
+  gid = 0
+
+[debug]
+  address = "/run/containerd-user/debug.sock"
+  level = "info"
+
+[metrics]
+  address = ""
+
+[cgroup]
+  path = "/eve/containerd"
