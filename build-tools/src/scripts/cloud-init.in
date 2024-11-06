@@ -1,0 +1,46 @@
+#cloud-config
+packages:
+  - jq
+  - qemu-utils
+  - make
+  - git
+  - apt-transport-https
+  - curl
+  - ca-certificates
+  - gnupg
+  - zstd
+
+groups:
+  - docker
+
+users:
+  - name: eve
+    ssh-authorized-keys:
+      - @SSH_PUB_KEY@
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    groups: sudo, docker
+    shell: /bin/bash
+
+write_files:
+  - content: |
+      #!/bin/sh
+      echo Running rc.local as `id` > /dev/console
+      sudo -u eve -i ./run.sh > /dev/console 2>&1 &
+    path: /etc/rc.local
+    permissions: '0777'
+    owner: root:root
+
+runcmd:
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+  - add-apt-repository "deb [arch=$(dpkg --print-architecture)] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+  - apt-get install -y docker-ce docker-ce-cli containerd.io
+  - systemctl enable --now docker
+  - curl -L https://github.com/actions/runner/releases/download/v2.278.0/actions-runner-linux-@ZARCH@-2.278.0.tar.gz | sudo -u eve -i tar xzf -
+  - sudo -u eve -i ./config.sh --name @ZARCH@ --replace --unattended --url https://github.com/lf-edge/eve --token @GH_TOKEN@
+
+power_state:
+  delay: "+1"
+  mode: poweroff
+  message: Done installing EVE build environment
+  timeout: 3600
+  condition: True
