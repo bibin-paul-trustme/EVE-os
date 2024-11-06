@@ -1,0 +1,7 @@
+#
+# https://github.com/codespell-project/codespell
+#
+
+[codespell]
+skip = ./.git/*,*/vendor/*,./conf/v2tlsbaseroot-certificates.pem,./pkg/gpt-tools/patches/*,./pkg/new-kernel/*,./pkg/kernel/*,./pkg/fw/*
+ignore-words-list = uptodate,synopsys,crate
